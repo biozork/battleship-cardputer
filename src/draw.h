@@ -13,3 +13,15 @@ struct Screen {
 
 // Draws a whole frame into the off-screen canvas. t is the time in ms (drives animation).
 void drawFrame(M5Canvas& c, const Screen& s, uint32_t t);
+
+// Radar screen while looking for a partner. lost = show "partner lost".
+void drawSearch(M5Canvas& c, uint32_t t, const char* myName, bool lost);
+
+// Milestone 3 test screen: link details and counters.
+struct LinkTestInfo {
+  const char* myName;
+  const char* peerName;
+  uint32_t heartbeats, pingsSent, pingsAcked, pingsIn, resends, rttMs;
+  bool flash;  // a ping just arrived
+};
+void drawLinkTest(M5Canvas& c, const LinkTestInfo& s, uint32_t t);

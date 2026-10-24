@@ -166,3 +166,80 @@ void drawFrame(M5Canvas& c, const Screen& s, uint32_t t) {
   drawPanel(c);
   drawPanelContents(c, s);
 }
+
+// ---------- search screen ----------
+void drawSearch(M5Canvas& c, uint32_t t, const char* myName, bool lost) {
+  drawBackground(c);
+  const int cx = 58, cy = 68, r = 46;
+  const uint32_t GREEN = 0x4CD27A, BRIGHT = 0x7CF2A4, DISC = 0x0A2016;
+  float a = fmodf(t / 650.0f, 2 * PI);
+
+  for (int rr = r; rr > 0; rr--) c.fillCircle(cx, cy, rr, rgb(mix(0x0D2A1C, 0x06140E, rr / float(r))));
+  for (int i = 0; i < 48; i++) {  // fading trail behind the sweep
+    float ang = a - 1.2f + i * 0.025f;
+    c.drawLine(cx, cy, cx + cosf(ang) * (r - 1), cy + sinf(ang) * (r - 1), rgb(mix(DISC, GREEN, 0.35f * i / 47)));
+  }
+  uint16_t ring = rgb(mix(DISC, GREEN, 0.35f));
+  for (int i = 1; i <= 3; i++) c.drawCircle(cx, cy, r * i / 3, ring);
+  c.drawFastHLine(cx - r, cy, 2 * r + 1, ring);
+  c.drawFastVLine(cx, cy - r, 2 * r + 1, ring);
+  c.drawLine(cx, cy, cx + cosf(a) * r, cy + sinf(a) * r, rgb(BRIGHT));
+
+  const float blips[4][2] = {{0.7f, 30}, {2.6f, 20}, {4.2f, 36}, {5.4f, 12}};
+  for (auto& b : blips) {  // blips light up as the sweep passes, then fade
+    float diff = fmodf(fmodf(a - b[0], 2 * PI) + 2 * PI, 2 * PI);
+    float al = 1 - diff / 2.4f;
+    if (al <= 0) continue;
+    c.fillCircle(cx + cosf(b[0]) * b[1], cy + sinf(b[0]) * b[1], 2, rgb(mix(DISC, BRIGHT, al)));
+  }
+
+  c.setFont(&fonts::FreeSansBold9pt7b);
+  c.setTextDatum(baseline_left);
+  c.setTextColor(rgb(C_YELLOW));
+  c.drawString("BATTLESHIP", 114, 52);
+  text(c, "two-player, ESP-NOW", 115, 60, C_MUTED);
+  if (lost) text(c, "partner lost!", 115, 74, 0xFF8787);
+  text(c, "searching for", 115, 86, C_WHITE);
+  char dots[12];
+  snprintf(dots, sizeof dots, "partner%.*s", int(t / 400 % 4), "...");
+  text(c, dots, 115, 97, C_WHITE);
+  text(c, myName, 115, 118, C_LABEL);
+}
+
+// ---------- link test screen (milestone 3) ----------
+void drawLinkTest(M5Canvas& c, const LinkTestInfo& s, uint32_t t) {
+  drawBackground(c);
+  const uint32_t GREEN = 0x4CD27A;
+  if (s.flash) {
+    c.drawRect(0, 0, 240, 135, rgb(GREEN));
+    c.drawRect(1, 1, 238, 133, rgb(GREEN));
+  }
+
+  c.setFont(&fonts::FreeSansBold9pt7b);
+  c.setTextDatum(baseline_left);
+  c.setTextColor(rgb(GREEN));
+  c.drawString("LINKED", 12, 20);
+  float pulse = (sinf(t / 250.0f) + 1) / 2;
+  c.fillCircle(84, 15, 3, rgb(mix(0x0A1822, GREEN, 0.3f + 0.7f * pulse)));
+  keyHint(c, "ok", "send ping", 148, 9);
+
+  char buf[32];
+  const char* labels[6] = {"you", "partner", "heartbeats", "pings sent", "pings got", "resends"};
+  for (int i = 0; i < 6; i++) {
+    int y = 28 + i * 16;
+    c.setFont(&fonts::Font2);
+    c.setTextDatum(top_left);
+    c.setTextColor(rgb(C_MUTED));
+    c.drawString(labels[i], 12, y);
+    switch (i) {
+      case 0: snprintf(buf, sizeof buf, "%s", s.myName); break;
+      case 1: snprintf(buf, sizeof buf, "%s", s.peerName); break;
+      case 2: snprintf(buf, sizeof buf, "%lu", (unsigned long)s.heartbeats); break;
+      case 3: snprintf(buf, sizeof buf, "%lu  (acked %lu)", (unsigned long)s.pingsSent, (unsigned long)s.pingsAcked); break;
+      case 4: snprintf(buf, sizeof buf, "%lu", (unsigned long)s.pingsIn); break;
+      case 5: snprintf(buf, sizeof buf, "%lu   rtt %lu ms", (unsigned long)s.resends, (unsigned long)s.rttMs); break;
+    }
+    c.setTextColor(rgb(i == 4 && s.flash ? GREEN : C_WHITE));
+    c.drawString(buf, 100, y);
+  }
+}
