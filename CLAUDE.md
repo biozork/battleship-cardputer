@@ -27,7 +27,7 @@ The look, game flow and sounds were designed in a browser mock: `reference/demo.
 - Whoever finishes placing first fires first. Turns alternate strictly: a hit does **not** grant another shot (decided by Lars).
 - Two views: "your shots" and "your fleet". `tab` switches between them. When the partner fires, the screen jumps to your fleet for about 1.3 s to show the impact, then back to your shots on your turn.
 - After a game, both press `ok` for a rematch. The win/loss score persists across games and should survive power off (store it in NVS, the chip's small built-in settings storage).
-- Suggested extra key: `m` toggles sound.
+- `m` toggles sound. Sound is **opt-in**: always off after power on (Lars's request), never on by default.
 
 ## Radio: ESP-NOW
 ESP-NOW is Espressif's direct chip-to-chip radio link. It needs no router and no pairing, and both devices run identical firmware.

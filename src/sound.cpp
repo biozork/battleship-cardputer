@@ -1,7 +1,7 @@
 #include <M5Cardputer.h>
 #include "sound.h"
 
-static bool enabled = true;
+static bool enabled = false;  // opt-in: always silent after power on, m turns it on
 
 // Plays notes one after another: {frequency Hz, length ms}.
 static void play(const uint16_t notes[][2], int n) {
@@ -45,6 +45,36 @@ void lost() {
 void turn() {
   const uint16_t n[][2] = {{660, 70}, {880, 100}};
   play(n, 2);
+}
+
+void fire() {
+  const uint16_t n[][2] = {{1400, 40}, {900, 50}, {500, 70}};
+  play(n, 3);
+}
+
+void hit() {  // low rumble
+  const uint16_t n[][2] = {{110, 120}, {80, 150}, {55, 220}};
+  play(n, 3);
+}
+
+void miss() {  // falling "splash"
+  const uint16_t n[][2] = {{520, 60}, {350, 80}, {200, 110}};
+  play(n, 3);
+}
+
+void sunk() {  // rumble, then a short descending tune
+  const uint16_t n[][2] = {{110, 120}, {70, 200}, {392, 150}, {330, 150}, {262, 150}, {196, 250}};
+  play(n, 6);
+}
+
+void win() {
+  const uint16_t n[][2] = {{523, 160}, {659, 160}, {784, 160}, {1047, 350}};
+  play(n, 4);
+}
+
+void lose() {
+  const uint16_t n[][2] = {{392, 220}, {311, 220}, {262, 450}};
+  play(n, 3);
 }
 
 }  // namespace Sound

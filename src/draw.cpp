@@ -1,4 +1,5 @@
 #include "draw.h"
+#include "sound.h"
 
 // Layout, same numbers as the mock: grid at (GX,GY), 11 px cells, panel at PX.
 static const int N = GRID_N, CS = 11, GX = 16, GY = 12, PX = 134, PANEL_W = 104;
@@ -119,10 +120,10 @@ static void drawSea(M5Canvas& c, uint32_t t, bool fog) {
   c.drawRect(GX - 1, GY - 1, size + 3, size + 3, rgb(mix(0x08141D, 0xAAD7F5, 0.35f)));
 }
 
-// Pulsing corner brackets around the square under the cursor (used in battle).
-__attribute__((unused)) static void drawCursor(M5Canvas& c, int cx, int cy, uint32_t t) {
+// Pulsing corner brackets around the square under the cursor.
+static void drawCursor(M5Canvas& c, int cx, int cy, uint32_t t, bool fog) {
   int px = GX + cx * CS, py = GY + cy * CS;
-  c.fillRect(px + 1, py + 1, CS - 1, CS - 1, rgb(mix(seaAt(py + 5, false), C_YELLOW, 0.18f)));
+  c.fillRect(px + 1, py + 1, CS - 1, CS - 1, rgb(mix(seaAt(py + 5, fog), C_YELLOW, 0.18f)));
 
   int p = lroundf((sinf(t / 160.0f) + 1) / 2 * 1.5f);  // 0..2 px breathing
   int x0 = px - p, y0 = py - p, s = CS + 2 * p, k = 4;
@@ -199,6 +200,29 @@ static void drawShip(M5Canvas& c, const Ship& s, Look look) {
   }
 }
 
+// ---------- hit and miss markers ----------
+// A burning square: a soft glow and three flickering flame layers. small = an older, dying fire.
+static void drawFire(M5Canvas& c, int x, int y, uint32_t t, bool small, bool fog) {
+  const float s = small ? 0.6f : 1.0f;
+  int cx = GX + x * CS + 6, cy = GY + y * CS + 7;
+  c.fillCircle(cx, cy - 1, lroundf(4 * s), rgb(mix(seaAt(cy, fog), 0xFF8C32, 0.4f)));
+  static const uint32_t cols[3] = {0xFF4D1A, 0xFF9F1C, 0xFFE066};
+  for (int i = 0; i < 3; i++) {
+    float f = sinf(t / 85.0f + i * 2.1f + x * 3 + y * 5);
+    float hgt = (4.5f + f * 1.4f - i * 0.9f) * s, w = (3.2f - i * 0.85f) * s;
+    c.fillTriangle(lroundf(cx - w), cy + 1, lroundf(cx + w), cy + 1, lroundf(cx + f * 0.7f), lroundf(cy - hgt),
+                   rgb(cols[i]));
+  }
+}
+
+// A miss: a white ring on the water, gently breathing.
+static void drawMiss(M5Canvas& c, int x, int y, uint32_t t, bool fog) {
+  int cx = GX + x * CS + 6, cy = GY + y * CS + 6;
+  int b = sinf(t / 500.0f + x + y) > 0.3f ? 1 : 0;
+  c.drawEllipse(cx, cy, 3 + b, 2 + b, rgb(mix(seaAt(cy, fog), 0xDCECF6, 0.75f)));
+  c.fillRect(cx - 1, cy - 1, 2, 2, rgb(0xEAF4FA));
+}
+
 // Small ship shape for the side panel. y is its top; it is 6 px tall.
 static void miniHull(M5Canvas& c, int x, int y, int len, uint32_t col1, uint32_t col2) {
   static const int8_t TIP[6] = {0, 1, 2, 2, 1, 0};
@@ -251,14 +275,142 @@ static void panelWait(M5Canvas& c, uint32_t t) {
   text(c, "fires first.", PX, 75, C_MUTED);
 }
 
-// Placeholder until milestone 5: shows whose turn it would be.
-static void panelBattle(M5Canvas& c, const Game& g) {
-  c.fillRoundRect(PX - 1, 6, 101, 17, 4, rgb(g.myTurn ? 0x2B8A3E : 0x2A3A44));
-  heading(c, g.myTurn ? "YOUR TURN" : "THEIR TURN", PX + 49, 20, 0xFFFFFF, baseline_center, 96);
-  text(c, g.msg[0], PX, 36, C_WHITE);
-  text(c, g.msg[1], PX, 47, C_YELLOW);
-  text(c, "Firing comes in", PX, 72, C_MUTED);
-  text(c, "milestone 5.", PX, 83, C_MUTED);
+static void scoreText(const Game& g, char* out, size_t n) {
+  snprintf(out, n, "score %u-%u", g.wins, g.losses);
+  if (strlen(out) > 9) snprintf(out, n, "%u-%u", g.wins, g.losses);  // keep it short for big scores
+}
+
+static void panelBattle(M5Canvas& c, const Game& g, uint32_t t) {
+  const bool live = g.myTurn && !g.pending;  // waiting for us to fire
+  float pulse = (sinf(t / 250.0f) + 1) / 2;
+  uint32_t banner = live ? mix(0x2B8A3E, 0x3CB955, pulse) : g.myTurn ? 0x2B8A3E : 0x2A3A44;
+  c.fillRoundRect(PX - 1, 6, 101, 17, 4, rgb(banner));
+  if (live) c.drawRoundRect(PX - 2, 5, 103, 19, 5, rgb(mix(0x13232D, C_GREEN, 0.3f + 0.7f * pulse)));
+  heading(c, g.myTurn ? (g.pending ? "FIRING..." : "YOUR TURN") : "THEIR TURN", PX + 49, 20, 0xFFFFFF,
+          baseline_center, 96);
+
+  text(c, g.view == View::Shots ? "your shots" : "your fleet", PX, 29, C_MUTED);
+  keycap(c, "tab", PX + 81, 27);
+
+  if (live && g.view == View::Shots) {
+    char coord[4];
+    coordName(g.cursorX, g.cursorY, coord);
+    c.setFont(&fonts::FreeSansBold12pt7b);
+    c.setTextSize(1);
+    c.setTextDatum(baseline_left);
+    c.setTextColor(rgb(C_YELLOW));
+    c.drawString(coord, PX, 58);
+  }
+  text(c, g.msg[0], PX, 63, C_WHITE);
+  text(c, g.msg[1], PX, 74, C_YELLOW);
+
+  // ships left: theirs and ours; sunk ones turn dark red
+  text(c, "them", PX, 88, C_MUTED);
+  for (int i = 0; i < NUM_SHIPS; i++) {
+    bool dead = i < g.enemySunkCount;
+    miniHull(c, PX + 28 + i * 14, 89, 11, dead ? 0x6A3128 : 0xC9D5DF, dead ? 0x2A1210 : 0x52627A);
+  }
+  int left = g.fleet.afloat();
+  text(c, "you", PX, 101, C_MUTED);
+  for (int i = 0; i < NUM_SHIPS; i++) {
+    bool dead = i >= left;
+    miniHull(c, PX + 28 + i * 14, 102, 11, dead ? 0x6A3128 : 0xC9D5DF, dead ? 0x2A1210 : 0x52627A);
+  }
+
+  char score[16];
+  scoreText(g, score, sizeof score);
+  text(c, score, PX, 119, C_MUTED);
+  if (live) keyHint(c, "ok", "fire", PX + 56, 117);
+}
+
+// ---------- board views ----------
+static void drawFleetView(M5Canvas& c, const Game& g, uint32_t t) {
+  drawSea(c, t, false);
+  for (int i = 0; i < g.fleet.count; i++) {
+    const Ship& s = g.fleet.ships[i];
+    drawShip(c, s, s.sunk() ? Look::Sunk : Look::Normal);
+  }
+  for (int y = 0; y < N; y++)
+    for (int x = 0; x < N; x++) {
+      if (g.incoming[y][x] == MARK_MISS) drawMiss(c, x, y, t, false);
+      else if (g.incoming[y][x] == MARK_HIT) {
+        int s = g.fleet.shipAt(x, y);
+        drawFire(c, x, y, t, s >= 0 && g.fleet.ships[s].sunk(), false);
+      }
+    }
+}
+
+static void drawShotsView(M5Canvas& c, const Game& g, uint32_t t) {
+  drawSea(c, t, true);
+  for (int i = 0; i < g.enemySunkCount; i++) drawShip(c, g.enemySunk[i], Look::Sunk);
+  for (int y = 0; y < N; y++)
+    for (int x = 0; x < N; x++) {
+      uint8_t m = g.shots[y][x];
+      if (m == MARK_MISS) drawMiss(c, x, y, t, true);
+      else if (m == MARK_HIT) drawFire(c, x, y, t, false, true);
+      else if (m == MARK_SUNK) drawFire(c, x, y, t, true, true);
+    }
+}
+
+// ---------- game over ----------
+// Blend every pixel already drawn towards one colour (k = 0..1), like a see-through overlay.
+static void tintScreen(M5Canvas& c, uint32_t col, float k) {
+  uint16_t* px = (uint16_t*)c.getBuffer();
+  if (!px) return;
+  const int kk = int(k * 256), tr = col >> 16, tg = (col >> 8) & 0xFF, tb = col & 0xFF;
+  for (int i = 0; i < 240 * 135; i++) {
+    uint16_t p = __builtin_bswap16(px[i]);  // the canvas stores pixels byte-swapped, ready for the display
+    int r = (p >> 8) & 0xF8, g = (p >> 3) & 0xFC, b = (p << 3) & 0xF8;
+    r += ((tr - r) * kk) >> 8;
+    g += ((tg - g) * kk) >> 8;
+    b += ((tb - b) * kk) >> 8;
+    px[i] = __builtin_bswap16(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+  }
+}
+
+static void fireworks(M5Canvas& c, uint32_t t) {
+  static const uint32_t cols[4] = {C_YELLOW, C_GREEN, 0x74C0FC, 0xFF8787};
+  for (int b = 0; b < 3; b++) {
+    const uint32_t per = 1600, tt = t + b * 530;
+    float ph = (tt % per) / float(per);
+    uint32_t seed = (tt / per) * 3 + b;
+    int cx = 40 + (seed * 73) % 160, cy = 22 + (seed * 41) % 40;
+    uint16_t col = rgb(mix(0x05090D, cols[seed % 4], 1 - ph));
+    for (int i = 0; i < 16; i++) {
+      float a = i / 16.0f * 2 * PI, r = ph * 24;
+      c.fillRect(cx + cosf(a) * r - 1, cy + sinf(a) * r + ph * ph * 10 - 1, 2, 2, col);
+    }
+  }
+}
+
+static void drawOver(M5Canvas& c, const Game& g, uint32_t t) {
+  if (g.won) tintScreen(c, 0x04090D, 0.8f);
+  else tintScreen(c, 0x1E0606, 0.82f);
+  if (g.won) fireworks(c, t);
+
+  int bob = lroundf(sinf(t / 300.0f) * 1.5f);
+  c.setFont(&fonts::FreeSansBold18pt7b);
+  c.setTextSize(1);
+  c.setTextDatum(baseline_center);
+  c.setTextColor(rgb(g.won ? C_YELLOW : 0xFF8787));
+  c.drawString(g.won ? "YOU WIN!" : "FLEET SUNK", 120, 56 + bob);
+
+  c.setFont(&fonts::Font2);
+  c.setTextDatum(top_center);
+  c.setTextColor(rgb(C_WHITE));
+  c.drawString(g.won ? "Every ship found." : "Good game, admiral.", 120, 62);
+  char score[24];
+  snprintf(score, sizeof score, "score %u - %u", g.wins, g.losses);
+  c.setTextColor(rgb(C_MUTED));
+  c.drawString(score, 120, 80);
+
+  if (g.wantRematch) {
+    char wait[28];
+    snprintf(wait, sizeof wait, "waiting for partner%.*s", int(t / 400 % 4), "...");
+    text(c, wait, 120, 108, C_GREEN, top_center);
+  } else if (sinf(t / 250.0f) > -0.5f) {  // blinking hint
+    keyHint(c, "ok", "rematch", 88, 105);
+  }
 }
 
 // ---------- search screen ----------
@@ -294,7 +446,8 @@ static void drawSearch(M5Canvas& c, uint32_t t, const char* myName, bool lost) {
   char dots[12];
   snprintf(dots, sizeof dots, "partner%.*s", int(t / 400 % 4), "...");
   text(c, dots, 115, 97, C_WHITE);
-  text(c, myName, 115, 118, C_LABEL);
+  text(c, Sound::on() ? "m: sound on" : "m: sound off", 115, 108, C_LABEL);
+  text(c, myName, 115, 120, C_LABEL);
 }
 
 // ---------- whole frame ----------
@@ -306,18 +459,24 @@ void drawGame(M5Canvas& c, const Game& g, uint32_t t, const char* myName, bool l
 
   drawBackground(c);
   const bool placing = g.phase == Phase::Place;
-  drawLabels(c, placing ? g.cursorX : -1, placing ? g.cursorY : -1);
-  drawSea(c, t, false);
-  for (int i = 0; i < g.fleet.count; i++) drawShip(c, g.fleet.ships[i], Look::Normal);
+  const bool battle = g.phase == Phase::Battle || g.phase == Phase::Over;
+  const bool aiming = g.phase == Phase::Battle && g.view == View::Shots && g.myTurn && !g.pending;
+  drawLabels(c, placing || aiming ? g.cursorX : -1, placing || aiming ? g.cursorY : -1);
+
+  c.setClipRect(GX, GY, N * CS + 1, N * CS + 1);  // anything hanging off the board gets cut off
+  if (battle && g.view == View::Shots) drawShotsView(c, g, t);
+  else drawFleetView(c, g, t);
   if (placing) {
     Ship gh = g.ghost();
-    c.setClipRect(GX, GY, N * CS + 1, N * CS + 1);  // a ghost hanging off the edge gets cut off
     drawShip(c, gh, g.fleet.fits(gh) ? Look::GhostOk : Look::GhostBad);
-    c.clearClipRect();
   }
+  c.clearClipRect();
+  if (aiming) drawCursor(c, g.cursorX, g.cursorY, t, true);
 
   drawPanel(c);
   if (placing) panelPlace(c, g);
   else if (g.phase == Phase::Waiting) panelWait(c, t);
-  else panelBattle(c, g);
+  else panelBattle(c, g, t);
+
+  if (g.phase == Phase::Over) drawOver(c, g, t);
 }

@@ -9,4 +9,10 @@ void bad();
 void link();
 void lost();
 void turn();
+void fire();
+void hit();
+void miss();
+void sunk();
+void win();
+void lose();
 }  // namespace Sound
