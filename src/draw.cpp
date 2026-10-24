@@ -29,6 +29,61 @@ static uint32_t mix(uint32_t a, uint32_t b, float k) {
 static const uint32_t C_YELLOW = 0xFFD43B, C_WHITE = 0xE8EEF0, C_MUTED = 0x9FB3BD, C_LABEL = 0x6F8794,
                       C_GREEN = 0x4CD27A;
 
+// ---------- see-through drawing ----------
+// The mock uses see-through colours a lot. These helpers blend straight into
+// the canvas memory. Pixels there are stored byte-swapped, ready for the display.
+static uint16_t* fb = nullptr;  // the canvas pixels, set at the start of each frame
+static int clipL = 0, clipT = 0, clipR = 240, clipB = 135;  // blending stays inside this box
+
+static void setClip(M5Canvas& c, int x, int y, int w, int h) {
+  c.setClipRect(x, y, w, h);
+  clipL = x, clipT = y, clipR = x + w, clipB = y + h;
+}
+
+static void clearClip(M5Canvas& c) {
+  c.clearClipRect();
+  clipL = 0, clipT = 0, clipR = 240, clipB = 135;
+}
+
+static int alpha256(float a) { return a <= 0 ? 0 : a >= 1 ? 256 : int(a * 256); }
+
+static inline void blendPixel(int x, int y, uint32_t col, int a) {  // a = 0..256
+  if (x < clipL || y < clipT || x >= clipR || y >= clipB) return;
+  uint16_t& px = fb[y * 240 + x];
+  uint16_t p = __builtin_bswap16(px);
+  int r = (p >> 8) & 0xF8, g = (p >> 3) & 0xFC, b = (p << 3) & 0xF8;
+  r += (((int)(col >> 16) - r) * a) >> 8;
+  g += (((int)((col >> 8) & 0xFF) - g) * a) >> 8;
+  b += (((int)(col & 0xFF) - b) * a) >> 8;
+  px = __builtin_bswap16(rgb((r << 16) | (g << 8) | b));
+}
+
+static void blendRect(int x, int y, int w, int h, uint32_t col, float alpha) {
+  int a = alpha256(alpha);
+  if (!fb || !a) return;
+  for (int j = y; j < y + h; j++)
+    for (int i = x; i < x + w; i++) blendPixel(i, j, col, a);
+}
+
+static void blendCircle(float cx, float cy, float r, uint32_t col, float alpha) {
+  int a = alpha256(alpha);
+  if (!fb || !a || r <= 0) return;
+  for (int j = floorf(cy - r); j <= ceilf(cy + r); j++)
+    for (int i = floorf(cx - r); i <= ceilf(cx + r); i++)
+      if ((i - cx) * (i - cx) + (j - cy) * (j - cy) <= r * r) blendPixel(i, j, col, a);
+}
+
+// Outline of an ellipse, see-through.
+static void blendEllipse(float cx, float cy, float rx, float ry, uint32_t col, float alpha) {
+  int a = alpha256(alpha);
+  if (!fb || !a) return;
+  int steps = 8 + int(rx * 5);
+  for (int i = 0; i < steps; i++) {
+    float ang = i * 2 * PI / steps;
+    blendPixel(lroundf(cx + cosf(ang) * rx), lroundf(cy + sinf(ang) * ry), col, a);
+  }
+}
+
 // ---------- text helpers ----------
 static void text(M5Canvas& c, const char* s, int x, int y, uint32_t col, uint8_t datum = top_left) {
   c.setFont(&fonts::Font0);  // 8 px tall, the smallest allowed
@@ -121,9 +176,9 @@ static void drawSea(M5Canvas& c, uint32_t t, bool fog) {
 }
 
 // Pulsing corner brackets around the square under the cursor.
-static void drawCursor(M5Canvas& c, int cx, int cy, uint32_t t, bool fog) {
+static void drawCursor(M5Canvas& c, int cx, int cy, uint32_t t) {
   int px = GX + cx * CS, py = GY + cy * CS;
-  c.fillRect(px + 1, py + 1, CS - 1, CS - 1, rgb(mix(seaAt(py + 5, fog), C_YELLOW, 0.18f)));
+  blendRect(px + 1, py + 1, CS - 1, CS - 1, C_YELLOW, 0.18f);
 
   int p = lroundf((sinf(t / 160.0f) + 1) / 2 * 1.5f);  // 0..2 px breathing
   int x0 = px - p, y0 = py - p, s = CS + 2 * p, k = 4;
@@ -144,7 +199,8 @@ enum class Look { Normal, Sunk, GhostOk, GhostBad };
 // A hull with a pointed bow, a bridge in the middle and guns.
 // The hull is drawn as 9 lines along the ship; "along" runs stern to bow.
 // Horizontal ships point right, vertical ships point up (as in the mock).
-static void drawShip(M5Canvas& c, const Ship& s, Look look) {
+// alpha only applies to the see-through ghost.
+static void drawShip(M5Canvas& c, const Ship& s, Look look, float alpha = 1) {
   const int L = s.size * CS, x0 = GX + s.x * CS, y0 = GY + s.y * CS;
   const bool h = s.horiz;
   static const int8_t STERN[5] = {0, 0, 0, 0, 1};  // rounding at the stern corners
@@ -155,32 +211,44 @@ static void drawShip(M5Canvas& c, const Ship& s, Look look) {
     from[a] = 2 + STERN[d];
     to[a] = L - 1 - BOW[d];
   }
-  auto span = [&](int a, int u0, int u1, uint16_t col) {
-    if (h) c.drawFastHLine(x0 + u0, y0 + 2 + a, u1 - u0 + 1, col);
-    else c.drawFastVLine(x0 + 2 + a, y0 + L - 1 - u1, u1 - u0 + 1, col);
+  const bool ghost = look == Look::GhostOk || look == Look::GhostBad;
+  auto span = [&](int a, int u0, int u1, uint32_t col, float al) {
+    int n = u1 - u0 + 1;
+    if (n <= 0) return;
+    if (ghost) {
+      if (h) blendRect(x0 + u0, y0 + 2 + a, n, 1, col, al);
+      else blendRect(x0 + 2 + a, y0 + L - 1 - u1, 1, n, col, al);
+    } else if (h) {
+      c.drawFastHLine(x0 + u0, y0 + 2 + a, n, rgb(col));
+    } else {
+      c.drawFastVLine(x0 + 2 + a, y0 + L - 1 - u1, n, rgb(col));
+    }
   };
 
-  const bool ghost = look == Look::GhostOk || look == Look::GhostBad;
   uint32_t edge;
   if (look == Look::GhostOk) edge = 0x9FF5C0;
   else if (look == Look::GhostBad) edge = 0xFF9A9A;
   else if (look == Look::Sunk) edge = 0x140807;
   else edge = 0x25313D;
-  uint32_t ghostFill = mix(seaAt(y0 + 5, false), look == Look::GhostOk ? C_GREEN : 0xF03E3E, 0.45f);
-
   for (int a = 0; a < 9; a++) {
-    span(a, from[a], to[a], rgb(edge));  // whole line in the outline colour...
-    if (a == 0 || a == 8) continue;
-    // ...then the inside, leaving a 1 px outline also where the neighbouring lines are shorter
-    int u0 = max(from[a] + 1, max(from[a - 1], from[a + 1]));
-    int u1 = min(to[a] - 1, min(to[a - 1], to[a + 1]));
+    // The inside of this line; the rest is outline. The outline is 1 px, also
+    // where the neighbouring lines are shorter. The first and last lines are all outline.
+    int u0 = to[a] + 1, u1 = to[a];
+    if (a > 0 && a < 8) {
+      u0 = max(from[a] + 1, max(from[a - 1], from[a + 1]));
+      u1 = min(to[a] - 1, min(to[a - 1], to[a + 1]));
+      if (u0 > u1) u0 = to[a] + 1, u1 = to[a];
+    }
+    span(a, from[a], u0 - 1, edge, alpha);
+    span(a, u1 + 1, to[a], edge, alpha);
     if (u0 > u1) continue;
     float k = a / 8.0f;
     uint32_t fill;
-    if (ghost) fill = ghostFill;
+    if (look == Look::GhostOk) fill = C_GREEN;
+    else if (look == Look::GhostBad) fill = 0xF03E3E;
     else if (look == Look::Sunk) fill = mix(0x6A3128, 0x2A1210, k);
     else fill = k < 0.45f ? mix(0xC9D5DF, 0x8C9DAF, k / 0.45f) : mix(0x8C9DAF, 0x52627A, (k - 0.45f) / 0.55f);
-    span(a, u0, u1, rgb(fill));
+    span(a, u0, u1, fill, 0.45f * alpha);
   }
   if (ghost) return;
 
@@ -221,6 +289,15 @@ static void drawMiss(M5Canvas& c, int x, int y, uint32_t t, bool fog) {
   int b = sinf(t / 500.0f + x + y) > 0.3f ? 1 : 0;
   c.drawEllipse(cx, cy, 3 + b, 2 + b, rgb(mix(seaAt(cy, fog), 0xDCECF6, 0.75f)));
   c.fillRect(cx - 1, cy - 1, 2, 2, rgb(0xEAF4FA));
+}
+
+// Two puffs of smoke drifting up from a wreck.
+static void drawSmoke(int x, int y, uint32_t t) {
+  for (int i = 0; i < 2; i++) {
+    float ph = fmodf(t / 1500.0f + i * 0.5f + ((x * 7 + y * 13) % 10) / 10.0f, 1);
+    float cx = GX + x * CS + 5.5f + sinf(ph * 6 + x) * 1.5f, cy = GY + y * CS + 5.5f - ph * 12;
+    blendCircle(cx, cy, 1.5f + ph * 3, 0x96A0AC, 0.4f * (1 - ph));
+  }
 }
 
 // Small ship shape for the side panel. y is its top; it is 6 px tall.
@@ -335,7 +412,9 @@ static void drawFleetView(M5Canvas& c, const Game& g, uint32_t t) {
       if (g.incoming[y][x] == MARK_MISS) drawMiss(c, x, y, t, false);
       else if (g.incoming[y][x] == MARK_HIT) {
         int s = g.fleet.shipAt(x, y);
-        drawFire(c, x, y, t, s >= 0 && g.fleet.ships[s].sunk(), false);
+        bool dead = s >= 0 && g.fleet.ships[s].sunk();
+        drawFire(c, x, y, t, dead, false);
+        if (dead) drawSmoke(x, y, t);
       }
     }
 }
@@ -348,24 +427,169 @@ static void drawShotsView(M5Canvas& c, const Game& g, uint32_t t) {
       uint8_t m = g.shots[y][x];
       if (m == MARK_MISS) drawMiss(c, x, y, t, true);
       else if (m == MARK_HIT) drawFire(c, x, y, t, false, true);
-      else if (m == MARK_SUNK) drawFire(c, x, y, t, true, true);
+      else if (m == MARK_SUNK) {
+        drawFire(c, x, y, t, true, true);
+        drawSmoke(x, y, t);
+      }
     }
+}
+
+// ---------- effects: explosions, splashes, banners, shake ----------
+enum class FxType : uint8_t { Boom, Splash, Banner };
+struct Effect {
+  bool active;
+  FxType type;
+  int8_t x, y;
+  View layer;  // which view it belongs to
+  uint32_t start, dur;
+  float seed;
+  const char* text;
+  uint32_t col;
+};
+static Effect effects[8];
+static uint32_t shakeStart = 0;
+static bool aimOn = false;
+static int8_t aimX, aimY;
+static uint32_t aimStart;
+
+static void addEffect(const Effect& e) {
+  for (auto& slot : effects)
+    if (!slot.active) {
+      slot = e;
+      return;
+    }
+  effects[0] = e;  // all busy: replace one
+}
+
+namespace Fx {
+void boom(int x, int y, View layer, uint32_t t) {
+  addEffect({true, FxType::Boom, (int8_t)x, (int8_t)y, layer, t, 700, random(600) / 100.0f, nullptr, 0});
+}
+void splash(int x, int y, View layer, uint32_t t) {
+  addEffect({true, FxType::Splash, (int8_t)x, (int8_t)y, layer, t, 750, 0, nullptr, 0});
+}
+void banner(const char* text, uint32_t col, uint32_t t) {
+  addEffect({true, FxType::Banner, 0, 0, View::Shots, t, 1500, 0, text, col});
+}
+void shake(uint32_t t) { shakeStart = t; }
+void aim(int x, int y, uint32_t t) {
+  aimOn = true;
+  aimX = x;
+  aimY = y;
+  aimStart = t;
+}
+void clearAim() { aimOn = false; }
+void clear() {
+  for (auto& e : effects) e.active = false;
+  aimOn = false;
+  shakeStart = 0;
+}
+}  // namespace Fx
+
+static void drawBoom(const Effect& e, float k) {
+  float cx = GX + e.x * CS + 6, cy = GY + e.y * CS + 6, r = 3 + k * 14;
+  // a fireball: white-hot centre, orange, fading to nothing at the edge
+  for (int j = floorf(cy - r); j <= ceilf(cy + r); j++)
+    for (int i = floorf(cx - r); i <= ceilf(cx + r); i++) {
+      float u = sqrtf((i - cx) * (i - cx) + (j - cy) * (j - cy)) / r;
+      if (u > 1) continue;
+      uint32_t col;
+      float a;
+      if (u < 0.4f) {
+        col = mix(0xFFFAD7, 0xFF9628, u / 0.4f);
+        a = (1 - k) * (1 - 0.1f * u / 0.4f);
+      } else {
+        col = mix(0xFF9628, 0xFF3C00, (u - 0.4f) / 0.6f);
+        a = 0.9f * (1 - k) * (1 - (u - 0.4f) / 0.6f);
+      }
+      blendPixel(i, j, col, alpha256(a));
+    }
+  for (int i = 0; i < 12; i++) {  // sparks flying out and falling
+    float ang = i / 12.0f * 2 * PI + e.seed, v = 9 + (i % 3) * 5;
+    float dx = cosf(ang) * v * k, dy = sinf(ang) * v * k + 16 * k * k;
+    uint32_t col = 0xFF0046 | ((190 - i * 9) << 8);
+    blendRect(lroundf(cx + dx) - 1, lroundf(cy + dy) - 1, 2, 2, col, 1 - k);
+  }
+}
+
+static void drawSplash(const Effect& e, float k) {
+  float cx = GX + e.x * CS + 6, cy = GY + e.y * CS + 6;
+  for (float o : {0.0f, 0.25f}) {  // two ripples, the second a moment later
+    float kk = k - o;
+    if (kk > 0) blendEllipse(cx, cy, 2 + kk * 10, 1 + kk * 5.5f, 0xE1F2FF, 1 - k);
+  }
+  for (int i = 0; i < 7; i++) {  // droplets thrown up and falling back
+    float ang = -PI / 2 + (i - 3) * 0.33f;
+    float dx = cosf(ang) * 13 * k, dy = sinf(ang) * 13 * k + 24 * k * k;
+    blendRect(lroundf(cx + dx) - 1, lroundf(cy + dy) - 1, 2, 2, 0xE6F5FF, 1 - k);
+  }
+}
+
+// "SUNK!" sliding in from the left, pausing, and sliding out to the right.
+static void drawBanner(M5Canvas& c, const Effect& e, float k) {
+  float in = k < 0.18f ? k / 0.18f : k > 0.82f ? (1 - k) / 0.18f : 1;
+  float ease = 1 - powf(1 - in, 3);
+  int cy = GY + N * CS / 2, w = N * CS;
+  int off = lroundf((1 - ease) * (k < 0.5f ? -50 : 50));
+  blendRect(GX, cy - 13, w + 1, 26, 0x04090D, 0.8f * ease);
+  blendRect(GX, cy - 13, w + 1, 2, e.col, ease);
+  blendRect(GX, cy + 11, w + 1, 2, e.col, ease);
+  setClip(c, GX, cy - 13, w + 1, 26);
+  c.setFont(&fonts::FreeSansBold12pt7b);
+  c.setTextSize(1);
+  c.setTextDatum(baseline_center);
+  c.setTextColor(rgb(mix(0x0A1218, e.col, ease)));
+  c.drawString(e.text, GX + w / 2 + off, cy + 8);
+  clearClip(c);
+}
+
+static void drawEffects(M5Canvas& c, const Game& g, uint32_t t) {
+  for (auto& e : effects) {
+    if (!e.active) continue;
+    int32_t el = (int32_t)(t - e.start);
+    if (el >= (int32_t)e.dur) {
+      e.active = false;
+      continue;
+    }
+    if (el < 0) continue;  // starts later
+    float k = el / float(e.dur);
+    if (e.type == FxType::Banner) {
+      drawBanner(c, e, k);
+      continue;
+    }
+    // only show it on the view it happened on (after the game, fleet effects always show)
+    if (e.layer != g.view && !(g.phase != Phase::Battle && e.layer == View::Fleet)) continue;
+    if (e.type == FxType::Boom) drawBoom(e, k);
+    else drawSplash(e, k);
+  }
+}
+
+// The target ring that shrinks onto the square we fired at.
+static void drawAim(M5Canvas& c, uint32_t t) {
+  float k = min(1.0f, (t - aimStart) / 260.0f);
+  int cx = GX + aimX * CS + 6, cy = GY + aimY * CS + 6, r = lroundf(4 + 12 * (1 - k));
+  uint16_t col = rgb(mix(0x0B2438, C_YELLOW, 0.9f));
+  c.drawCircle(cx, cy, r, col);
+  c.drawFastHLine(cx - r - 2, cy, 5, col);
+  c.drawFastHLine(cx + r - 2, cy, 5, col);
+  c.drawFastVLine(cx, cy - r - 2, 5, col);
+  c.drawFastVLine(cx, cy + r - 2, 5, col);
+}
+
+void present(M5Canvas& c, uint32_t t) {
+  int ox = 0;
+  int32_t el = (int32_t)(t - shakeStart);
+  if (shakeStart && el >= 0 && el < 380) ox = lroundf(sinf(el / 15.0f) * 3 * (1 - el / 380.0f));
+  c.pushSprite(ox, 0);
+  // fill the strip the shifted picture leaves uncovered
+  if (ox > 0) M5Cardputer.Display.fillRect(0, 0, ox, 135, rgb(0x071019));
+  if (ox < 0) M5Cardputer.Display.fillRect(240 + ox, 0, -ox, 135, rgb(0x071019));
 }
 
 // ---------- game over ----------
 // Blend every pixel already drawn towards one colour (k = 0..1), like a see-through overlay.
 static void tintScreen(M5Canvas& c, uint32_t col, float k) {
-  uint16_t* px = (uint16_t*)c.getBuffer();
-  if (!px) return;
-  const int kk = int(k * 256), tr = col >> 16, tg = (col >> 8) & 0xFF, tb = col & 0xFF;
-  for (int i = 0; i < 240 * 135; i++) {
-    uint16_t p = __builtin_bswap16(px[i]);  // the canvas stores pixels byte-swapped, ready for the display
-    int r = (p >> 8) & 0xF8, g = (p >> 3) & 0xFC, b = (p << 3) & 0xF8;
-    r += ((tr - r) * kk) >> 8;
-    g += ((tg - g) * kk) >> 8;
-    b += ((tb - b) * kk) >> 8;
-    px[i] = __builtin_bswap16(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
-  }
+  blendRect(0, 0, 240, 135, col, k);
 }
 
 static void fireworks(M5Canvas& c, uint32_t t) {
@@ -452,6 +676,7 @@ static void drawSearch(M5Canvas& c, uint32_t t, const char* myName, bool lost) {
 
 // ---------- whole frame ----------
 void drawGame(M5Canvas& c, const Game& g, uint32_t t, const char* myName, bool lost) {
+  fb = (uint16_t*)c.getBuffer();
   if (g.phase == Phase::Search) {
     drawSearch(c, t, myName, lost);
     return;
@@ -463,15 +688,17 @@ void drawGame(M5Canvas& c, const Game& g, uint32_t t, const char* myName, bool l
   const bool aiming = g.phase == Phase::Battle && g.view == View::Shots && g.myTurn && !g.pending;
   drawLabels(c, placing || aiming ? g.cursorX : -1, placing || aiming ? g.cursorY : -1);
 
-  c.setClipRect(GX, GY, N * CS + 1, N * CS + 1);  // anything hanging off the board gets cut off
+  setClip(c, GX, GY, N * CS + 1, N * CS + 1);  // anything hanging off the board gets cut off
   if (battle && g.view == View::Shots) drawShotsView(c, g, t);
   else drawFleetView(c, g, t);
   if (placing) {
     Ship gh = g.ghost();
-    drawShip(c, gh, g.fleet.fits(gh) ? Look::GhostOk : Look::GhostBad);
+    drawShip(c, gh, g.fleet.fits(gh) ? Look::GhostOk : Look::GhostBad, 0.8f + 0.2f * sinf(t / 200.0f));
   }
-  c.clearClipRect();
-  if (aiming) drawCursor(c, g.cursorX, g.cursorY, t, true);
+  clearClip(c);
+  if (aiming) drawCursor(c, g.cursorX, g.cursorY, t);
+  if (aimOn && g.pending && g.view == View::Shots) drawAim(c, t);
+  drawEffects(c, g, t);
 
   drawPanel(c);
   if (placing) panelPlace(c, g);

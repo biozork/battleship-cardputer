@@ -47,6 +47,7 @@ static void startPlacement() {
   game.newGame();
   game.phase = Phase::Place;
   backToShotsAt = 0;
+  Fx::clear();
 }
 
 // ---------- ready / who goes first ----------
@@ -103,6 +104,7 @@ static void fire() {
   FireMsg f = {(uint8_t)game.cursorX, (uint8_t)game.cursorY};
   if (!Link::send(MSG_FIRE, &f, sizeof f)) return;
   game.pending = true;
+  Fx::aim(game.cursorX, game.cursorY, millis());
   char line[24];
   snprintf(line, sizeof line, "Firing at %s...", sq);
   game.setMsg(line);
@@ -130,6 +132,13 @@ static void onFire(const Message& m, uint32_t now) {
     game.setMsg(line, r.hit ? "hit!" : "miss.");
   }
   game.view = View::Fleet;  // look at where it landed
+  if (r.hit) {
+    Fx::boom(f.x, f.y, View::Fleet, now);
+    Fx::shake(now);
+  } else {
+    Fx::splash(f.x, f.y, View::Fleet, now);
+  }
+  if (r.sunk != NO_SHIP) Fx::banner("SUNK!", 0xFF8787, now + 350);
 
   if (r.win) {
     game.phase = Phase::Over;
@@ -154,6 +163,15 @@ static void onResult(const Message& m) {
   if (r.x >= GRID_N || r.y >= GRID_N) return;
 
   game.applyResult(r);
+  uint32_t now = millis();
+  Fx::clearAim();
+  if (r.hit) {
+    Fx::boom(r.x, r.y, View::Shots, now);
+    Fx::shake(now);
+  } else {
+    Fx::splash(r.x, r.y, View::Shots, now);
+  }
+  if (r.sunk != NO_SHIP && !r.win) Fx::banner("SUNK!", 0xFFD43B, now + 350);
   game.pending = false;
   game.myTurn = false;
   char sq[8];
@@ -280,6 +298,7 @@ void loop() {
     Serial.println("Partner lost");
     game.newGame();
     game.phase = Phase::Search;
+    Fx::clear();
     lostUntil = now + 5000;
     Sound::lost();
   }
@@ -310,6 +329,6 @@ void loop() {
   if (now - lastFrame >= FRAME_MS) {
     lastFrame = now;
     drawGame(canvas, game, now, Link::myName(), now < lostUntil);
-    canvas.pushSprite(0, 0);
+    present(canvas, now);
   }
 }
