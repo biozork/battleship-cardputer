@@ -277,6 +277,7 @@ LinkEvent update() {
 bool connected() { return state == State::Connected; }
 const char* myName() { return myNameBuf; }
 const char* peerName() { return peerNameBuf; }
+bool iAmLower() { return memcmp(myMac, peer, 6) < 0; }
 const LinkStats& stats() { return st; }
 
 bool send(uint8_t type, const void* data, uint8_t len) {

@@ -43,6 +43,9 @@ LinkEvent update();  // call every loop; reports when a partner is found or lost
 bool connected();
 const char* myName();
 const char* peerName();
+// True if our MAC address sorts below the partner's. Used as a fair tie-breaker
+// that both devices agree on without talking.
+bool iAmLower();
 // Queue a reliable message for the partner. Returns false if not connected or the queue is full.
 bool send(uint8_t type, const void* data = nullptr, uint8_t len = 0);
 // Take the next message that arrived from the partner. Returns false if there is none.

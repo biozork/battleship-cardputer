@@ -1,19 +1,19 @@
-// Milestone 3: ESP-NOW link test.
-// The two Cardputers find each other over the radio and show live counters.
-// Press ok to send a "ping": the other device beeps and counts it.
+// Milestone 4: placement.
+// The devices pair up, each player places five ships, and when both are
+// ready the one who finished first gets the first shot.
 
 #include <M5Cardputer.h>
 #include "draw.h"
+#include "game.h"
 #include "input.h"
 #include "link.h"
+#include "sound.h"
 
 static M5Canvas canvas(&M5Cardputer.Display);  // the off-screen buffer, 240x135
+static Game game;
 
 static const uint32_t FRAME_MS = 33;  // about 30 frames per second
-
-static uint32_t pingsIn = 0;
-static uint32_t flashUntil = 0;  // highlight the screen briefly when a ping arrives
-static uint32_t lostUntil = 0;   // show "partner lost" on the search screen until then
+static uint32_t lostUntil = 0;        // show "partner lost" on the search screen until then
 
 void setup() {
   auto cfg = M5.config();
@@ -29,6 +29,68 @@ void setup() {
   Serial.printf("I am %s\n", Link::myName());
 }
 
+static void startBattle(bool first) {
+  game.phase = Phase::Battle;
+  game.myTurn = first;
+  if (first) {
+    game.setMsg("Ready first:", "you fire first!");
+    Sound::turn();
+  } else {
+    game.setMsg("Partner fires", "first. Brace!");
+  }
+}
+
+// Our fleet is placed. The READY message says whether we had already heard
+// the partner's READY, so both sides agree on who was first.
+static void becomeReady() {
+  game.phase = Phase::Waiting;
+  game.ready = true;
+  uint8_t sawYours = game.peerReady;
+  Link::send(MSG_READY, &sawYours, 1);
+  if (game.peerReady) startBattle(false);
+}
+
+static void onReady(const Message& m) {
+  game.peerReady = true;
+  if (game.ready) {
+    bool theySawMine = m.len > 0 && m.data[0];
+    // If they had heard our READY, we were first. If not, both pressed at
+    // the same moment: the MAC addresses decide.
+    startBattle(theySawMine || Link::iAmLower());
+  } else {
+    game.setMsg("Partner is ready.");
+  }
+}
+
+static void handlePlaceKey(const KeyEvent& k) {
+  switch (k.key) {
+    case Key::Up:    if (game.cursorY > 0) game.cursorY--; break;
+    case Key::Down:  if (game.cursorY < GRID_N - 1) game.cursorY++; break;
+    case Key::Left:  if (game.cursorX > 0) game.cursorX--; break;
+    case Key::Right: if (game.cursorX < GRID_N - 1) game.cursorX++; break;
+    case Key::Ok: {
+      Ship s = game.ghost();
+      if (game.fleet.fits(s)) {
+        game.fleet.add(s);
+        Sound::place();
+        if (game.fleet.count == NUM_SHIPS) becomeReady();
+      } else {
+        Sound::bad();
+      }
+      break;
+    }
+    case Key::Char:
+      if (k.ch == 'r') game.horiz = !game.horiz;
+      if (k.ch == 'a') {
+        game.fleet.autoPlace();
+        Sound::place();
+        becomeReady();
+      }
+      break;
+    default: break;
+  }
+}
+
 void loop() {
   M5Cardputer.update();
   uint32_t now = millis();
@@ -36,41 +98,33 @@ void loop() {
   LinkEvent ev = Link::update();
   if (ev == LinkEvent::Connected) {
     Serial.printf("Linked with %s\n", Link::peerName());
-    pingsIn = 0;
-    M5Cardputer.Speaker.tone(900, 90);  // "link found": two rising notes
-    M5Cardputer.Speaker.tone(1350, 120, -1, false);
+    game.newGame();
+    game.phase = Phase::Place;
+    char found[24];
+    snprintf(found, sizeof found, "Found %s!", Link::peerName() + 10);  // just the 4 hex digits
+    game.setMsg(found);
+    Sound::link();
   } else if (ev == LinkEvent::Lost) {
     Serial.println("Partner lost");
+    game.newGame();
+    game.phase = Phase::Search;
     lostUntil = now + 5000;
-    M5Cardputer.Speaker.tone(400, 150);
-    M5Cardputer.Speaker.tone(250, 200, -1, false);
+    Sound::lost();
   }
 
   Message m;
   while (Link::receive(m)) {
-    if (m.type == MSG_PING) {
-      pingsIn++;
-      flashUntil = now + 200;
-      M5Cardputer.Speaker.tone(1500, 50);
-    }
+    if (m.type == MSG_READY) onReady(m);
   }
 
   KeyEvent k = pollKey();
-  if (k.key == Key::Ok && Link::connected()) {
-    if (Link::send(MSG_PING)) M5Cardputer.Speaker.tone(700, 30);
-  }
+  if (k.key == Key::Char && k.ch == 'm') Sound::toggle();
+  else if (k.key != Key::None && game.phase == Phase::Place) handlePlaceKey(k);
 
   static uint32_t lastFrame = 0;
   if (now - lastFrame >= FRAME_MS) {
     lastFrame = now;
-    if (Link::connected()) {
-      const LinkStats& s = Link::stats();
-      LinkTestInfo info = {Link::myName(), Link::peerName(), s.heartbeatsIn, s.sent, s.acked,
-                           pingsIn, s.resends, s.lastRttMs, now < flashUntil};
-      drawLinkTest(canvas, info, now);
-    } else {
-      drawSearch(canvas, now, Link::myName(), now < lostUntil);
-    }
+    drawGame(canvas, game, now, Link::myName(), now < lostUntil);
     canvas.pushSprite(0, 0);
   }
 }

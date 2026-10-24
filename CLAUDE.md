@@ -24,7 +24,7 @@ The look, game flow and sounds were designed in a browser mock: `reference/demo.
 ## Game rules (as in the mock)
 - 10x10 grid, columns A-J, rows 1-10. Five ships: Carrier 5, Battleship 4, Cruiser 3, Submarine 3, Destroyer 2.
 - Placement: move with the arrow keys. `r` rotates, `ok` places, `a` auto-places the remaining ships. A ghost ship shows green when it fits and red when it doesn't.
-- Whoever finishes placing first fires first. Turns alternate. Open question for Lars: should a hit grant another shot?
+- Whoever finishes placing first fires first. Turns alternate strictly: a hit does **not** grant another shot (decided by Lars).
 - Two views: "your shots" and "your fleet". `tab` switches between them. When the partner fires, the screen jumps to your fleet for about 1.3 s to show the impact, then back to your shots on your turn.
 - After a game, both press `ok` for a rematch. The win/loss score persists across games and should survive power off (store it in NVS, the chip's small built-in settings storage).
 - Suggested extra key: `m` toggles sound.

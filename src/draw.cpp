@@ -1,7 +1,7 @@
 #include "draw.h"
 
 // Layout, same numbers as the mock: grid at (GX,GY), 11 px cells, panel at PX.
-static const int N = GRID_N, CS = 11, GX = 16, GY = 12, PX = 134;
+static const int N = GRID_N, CS = 11, GX = 16, GY = 12, PX = 134, PANEL_W = 104;
 static const char* COLS = "ABCDEFGHIJ";
 
 // ---------- colours ----------
@@ -25,17 +25,32 @@ static uint32_t mix(uint32_t a, uint32_t b, float k) {
   return out;
 }
 
-static const uint32_t C_YELLOW = 0xFFD43B, C_WHITE = 0xE8EEF0, C_MUTED = 0x9FB3BD, C_LABEL = 0x6F8794;
+static const uint32_t C_YELLOW = 0xFFD43B, C_WHITE = 0xE8EEF0, C_MUTED = 0x9FB3BD, C_LABEL = 0x6F8794,
+                      C_GREEN = 0x4CD27A;
 
-// ---------- small helpers ----------
+// ---------- text helpers ----------
 static void text(M5Canvas& c, const char* s, int x, int y, uint32_t col, uint8_t datum = top_left) {
   c.setFont(&fonts::Font0);  // 8 px tall, the smallest allowed
+  c.setTextSize(1);
   c.setTextDatum(datum);
   c.setTextColor(rgb(col));
   c.drawString(s, x, y);
 }
 
-// A little key drawn like a keyboard key, e.g. [tab]. Returns its width.
+// Bold heading; y is the baseline. Shrinks a little if it would not fit in maxW.
+static void heading(M5Canvas& c, const char* s, int x, int y, uint32_t col, uint8_t datum = baseline_left,
+                    int maxW = PANEL_W) {
+  c.setFont(&fonts::FreeSansBold9pt7b);
+  c.setTextSize(1);
+  int w = c.textWidth(s);
+  if (w > maxW) c.setTextSize(maxW / float(w));
+  c.setTextDatum(datum);
+  c.setTextColor(rgb(col));
+  c.drawString(s, x, y);
+  c.setTextSize(1);
+}
+
+// A little key drawn like a keyboard key, e.g. [tab]. y is its top. Returns its width.
 static int keycap(M5Canvas& c, const char* k, int x, int y) {
   int w = strlen(k) * 6 + 5;
   c.fillRoundRect(x, y, w, 11, 2, rgb(0x26363F));
@@ -60,6 +75,7 @@ static uint32_t seaAt(int y, bool fog) {
   return fog ? mix(0x0B2438, 0x061522, k) : mix(0x11507F, 0x0A3256, k);
 }
 
+// Column letters and row numbers. The cursor's column and row light up (-1 = none).
 static void drawLabels(M5Canvas& c, int cx, int cy) {
   char buf[4];
   for (int i = 0; i < N; i++) {
@@ -103,8 +119,8 @@ static void drawSea(M5Canvas& c, uint32_t t, bool fog) {
   c.drawRect(GX - 1, GY - 1, size + 3, size + 3, rgb(mix(0x08141D, 0xAAD7F5, 0.35f)));
 }
 
-// Pulsing corner brackets around the square under the cursor.
-static void drawCursor(M5Canvas& c, int cx, int cy, uint32_t t) {
+// Pulsing corner brackets around the square under the cursor (used in battle).
+__attribute__((unused)) static void drawCursor(M5Canvas& c, int cx, int cy, uint32_t t) {
   int px = GX + cx * CS, py = GY + cy * CS;
   c.fillRect(px + 1, py + 1, CS - 1, CS - 1, rgb(mix(seaAt(py + 5, false), C_YELLOW, 0.18f)));
 
@@ -121,6 +137,75 @@ static void drawCursor(M5Canvas& c, int cx, int cy, uint32_t t) {
   }
 }
 
+// ---------- ships ----------
+enum class Look { Normal, Sunk, GhostOk, GhostBad };
+
+// A hull with a pointed bow, a bridge in the middle and guns.
+// The hull is drawn as 9 lines along the ship; "along" runs stern to bow.
+// Horizontal ships point right, vertical ships point up (as in the mock).
+static void drawShip(M5Canvas& c, const Ship& s, Look look) {
+  const int L = s.size * CS, x0 = GX + s.x * CS, y0 = GY + s.y * CS;
+  const bool h = s.horiz;
+  static const int8_t STERN[5] = {0, 0, 0, 0, 1};  // rounding at the stern corners
+  static const int8_t BOW[5] = {0, 0, 1, 2, 4};    // taper towards the bow tip
+  int from[9], to[9];
+  for (int a = 0; a < 9; a++) {
+    int d = abs(a - 4);
+    from[a] = 2 + STERN[d];
+    to[a] = L - 1 - BOW[d];
+  }
+  auto span = [&](int a, int u0, int u1, uint16_t col) {
+    if (h) c.drawFastHLine(x0 + u0, y0 + 2 + a, u1 - u0 + 1, col);
+    else c.drawFastVLine(x0 + 2 + a, y0 + L - 1 - u1, u1 - u0 + 1, col);
+  };
+
+  const bool ghost = look == Look::GhostOk || look == Look::GhostBad;
+  uint32_t edge;
+  if (look == Look::GhostOk) edge = 0x9FF5C0;
+  else if (look == Look::GhostBad) edge = 0xFF9A9A;
+  else if (look == Look::Sunk) edge = 0x140807;
+  else edge = 0x25313D;
+  uint32_t ghostFill = mix(seaAt(y0 + 5, false), look == Look::GhostOk ? C_GREEN : 0xF03E3E, 0.45f);
+
+  for (int a = 0; a < 9; a++) {
+    span(a, from[a], to[a], rgb(edge));  // whole line in the outline colour...
+    if (a == 0 || a == 8) continue;
+    // ...then the inside, leaving a 1 px outline also where the neighbouring lines are shorter
+    int u0 = max(from[a] + 1, max(from[a - 1], from[a + 1]));
+    int u1 = min(to[a] - 1, min(to[a - 1], to[a + 1]));
+    if (u0 > u1) continue;
+    float k = a / 8.0f;
+    uint32_t fill;
+    if (ghost) fill = ghostFill;
+    else if (look == Look::Sunk) fill = mix(0x6A3128, 0x2A1210, k);
+    else fill = k < 0.45f ? mix(0xC9D5DF, 0x8C9DAF, k / 0.45f) : mix(0x8C9DAF, 0x52627A, (k - 0.45f) / 0.55f);
+    span(a, u0, u1, rgb(fill));
+  }
+  if (ghost) return;
+
+  const bool sunk = look == Look::Sunk;
+  const int n = s.size;
+  for (int i = 0; i < n; i++) {
+    int cx = h ? x0 + i * CS + 6 : x0 + 6, cy = h ? y0 + 6 : y0 + i * CS + 6;
+    if (i == n / 2) {  // bridge
+      c.fillRect(cx - 2, cy - 2, 5, 5, rgb(sunk ? 0x3B1A15 : 0xDFE8EF));
+      c.fillRect(cx - 1, cy - 1, 3, 3, rgb(sunk ? 0x1E0C0A : 0x4B5D70));
+    } else if (i != n - 1 || n == 2) {  // gun turret with a barrel pointing to the bow
+      uint16_t col = rgb(sunk ? 0x2E1410 : 0x3A4A5C);
+      c.fillRect(cx - 1, cy - 1, 3, 3, col);
+      if (h) c.drawFastHLine(cx, cy, 4, col);
+      else c.drawFastVLine(cx, cy - 3, 4, col);
+    }
+  }
+}
+
+// Small ship shape for the side panel. y is its top; it is 6 px tall.
+static void miniHull(M5Canvas& c, int x, int y, int len, uint32_t col1, uint32_t col2) {
+  static const int8_t TIP[6] = {0, 1, 2, 2, 1, 0};
+  for (int r = 0; r < 6; r++) c.drawFastHLine(x, y + r, len - 3 + TIP[r], rgb(mix(col1, col2, r / 5.0f)));
+}
+
+// ---------- side panel ----------
 // Rounded side panel with a dark top-to-bottom gradient.
 static void drawPanel(M5Canvas& c) {
   const int x = PX - 5, y = 2, w = 240 - PX + 3, h = 131, r = 5;
@@ -133,53 +218,62 @@ static void drawPanel(M5Canvas& c) {
   c.drawRoundRect(x, y, w, h, r, rgb(mix(0x101D25, 0x8CBED7, 0.12f)));
 }
 
-static void drawPanelContents(M5Canvas& c, const Screen& s) {
-  c.setFont(&fonts::FreeSansBold9pt7b);
-  c.setTextDatum(baseline_left);
-  c.setTextColor(rgb(C_YELLOW));
-  c.drawString("TARGET", PX, 19);
+static void panelPlace(M5Canvas& c, const Game& g) {
+  const ShipType& type = SHIP_TYPES[g.fleet.count];
+  heading(c, "PLACE FLEET", PX, 17, C_YELLOW);
 
-  text(c, s.fog ? "your shots" : "your fleet", PX, 29, C_MUTED);
-  keycap(c, "tab", PX + 80, 27);
+  c.setFont(&fonts::Font2);
+  c.setTextDatum(top_left);
+  c.setTextColor(rgb(0xFFFFFF));
+  c.drawString(type.name, PX, 22);
+  miniHull(c, PX, 40, type.size * 10, 0xC9D5DF, 0x52627A);
 
-  char coord[4];
-  snprintf(coord, sizeof coord, "%c%d", COLS[s.cursorX], s.cursorY + 1);
-  c.setFont(&fonts::FreeSansBold12pt7b);
-  c.setTextDatum(baseline_left);
-  c.setTextColor(rgb(C_YELLOW));
-  c.drawString(coord, PX, 62);
+  for (int i = 0; i < NUM_SHIPS; i++) {  // progress: placed, current, still to come
+    uint32_t col = i < g.fleet.count ? C_GREEN : i == g.fleet.count ? C_YELLOW : 0x2C3E48;
+    c.fillCircle(PX + 3 + i * 9, 56, 2, rgb(col));
+  }
 
-  text(c, "arrows  move", PX, 74, C_MUTED);
-  keyHint(c, "tab", "view", PX, 86);
-  keyHint(c, "ok", "beep", PX, 100);
-
-  char fps[12];
-  snprintf(fps, sizeof fps, "fps %d", s.fps);
-  text(c, fps, PX, 122, C_LABEL);
+  keyHint(c, "r", "rotate", PX, 68);
+  keyHint(c, "a", "auto", PX, 82);
+  keyHint(c, "ok", "place", PX, 96);
+  if (g.msg[0][0]) text(c, g.msg[0], PX, 119, C_GREEN);
 }
 
-void drawFrame(M5Canvas& c, const Screen& s, uint32_t t) {
-  drawBackground(c);
-  drawLabels(c, s.cursorX, s.cursorY);
-  drawSea(c, t, s.fog);
-  drawCursor(c, s.cursorX, s.cursorY, t);
-  drawPanel(c);
-  drawPanelContents(c, s);
+static void panelWait(M5Canvas& c, uint32_t t) {
+  heading(c, "FLEET READY", PX, 17, C_GREEN);
+  text(c, "Waiting for", PX, 30, C_WHITE);
+  text(c, "partner", PX, 41, C_WHITE);
+  for (int i = 0; i < 3; i++) {
+    float a = (sinf(t / 200.0f - i * 0.7f) + 1) / 2;
+    c.fillCircle(PX + 46 + i * 6, 47, 1, rgb(mix(0x0F1D25, C_GREEN, 0.3f + 0.7f * a)));
+  }
+  text(c, "First one ready", PX, 64, C_MUTED);
+  text(c, "fires first.", PX, 75, C_MUTED);
+}
+
+// Placeholder until milestone 5: shows whose turn it would be.
+static void panelBattle(M5Canvas& c, const Game& g) {
+  c.fillRoundRect(PX - 1, 6, 101, 17, 4, rgb(g.myTurn ? 0x2B8A3E : 0x2A3A44));
+  heading(c, g.myTurn ? "YOUR TURN" : "THEIR TURN", PX + 49, 20, 0xFFFFFF, baseline_center, 96);
+  text(c, g.msg[0], PX, 36, C_WHITE);
+  text(c, g.msg[1], PX, 47, C_YELLOW);
+  text(c, "Firing comes in", PX, 72, C_MUTED);
+  text(c, "milestone 5.", PX, 83, C_MUTED);
 }
 
 // ---------- search screen ----------
-void drawSearch(M5Canvas& c, uint32_t t, const char* myName, bool lost) {
+static void drawSearch(M5Canvas& c, uint32_t t, const char* myName, bool lost) {
   drawBackground(c);
   const int cx = 58, cy = 68, r = 46;
-  const uint32_t GREEN = 0x4CD27A, BRIGHT = 0x7CF2A4, DISC = 0x0A2016;
+  const uint32_t BRIGHT = 0x7CF2A4, DISC = 0x0A2016;
   float a = fmodf(t / 650.0f, 2 * PI);
 
   for (int rr = r; rr > 0; rr--) c.fillCircle(cx, cy, rr, rgb(mix(0x0D2A1C, 0x06140E, rr / float(r))));
   for (int i = 0; i < 48; i++) {  // fading trail behind the sweep
     float ang = a - 1.2f + i * 0.025f;
-    c.drawLine(cx, cy, cx + cosf(ang) * (r - 1), cy + sinf(ang) * (r - 1), rgb(mix(DISC, GREEN, 0.35f * i / 47)));
+    c.drawLine(cx, cy, cx + cosf(ang) * (r - 1), cy + sinf(ang) * (r - 1), rgb(mix(DISC, C_GREEN, 0.35f * i / 47)));
   }
-  uint16_t ring = rgb(mix(DISC, GREEN, 0.35f));
+  uint16_t ring = rgb(mix(DISC, C_GREEN, 0.35f));
   for (int i = 1; i <= 3; i++) c.drawCircle(cx, cy, r * i / 3, ring);
   c.drawFastHLine(cx - r, cy, 2 * r + 1, ring);
   c.drawFastVLine(cx, cy - r, 2 * r + 1, ring);
@@ -193,10 +287,7 @@ void drawSearch(M5Canvas& c, uint32_t t, const char* myName, bool lost) {
     c.fillCircle(cx + cosf(b[0]) * b[1], cy + sinf(b[0]) * b[1], 2, rgb(mix(DISC, BRIGHT, al)));
   }
 
-  c.setFont(&fonts::FreeSansBold9pt7b);
-  c.setTextDatum(baseline_left);
-  c.setTextColor(rgb(C_YELLOW));
-  c.drawString("BATTLESHIP", 114, 52);
+  heading(c, "BATTLESHIP", 114, 52, C_YELLOW, baseline_left, 122);
   text(c, "two-player, ESP-NOW", 115, 60, C_MUTED);
   if (lost) text(c, "partner lost!", 115, 74, 0xFF8787);
   text(c, "searching for", 115, 86, C_WHITE);
@@ -206,40 +297,27 @@ void drawSearch(M5Canvas& c, uint32_t t, const char* myName, bool lost) {
   text(c, myName, 115, 118, C_LABEL);
 }
 
-// ---------- link test screen (milestone 3) ----------
-void drawLinkTest(M5Canvas& c, const LinkTestInfo& s, uint32_t t) {
+// ---------- whole frame ----------
+void drawGame(M5Canvas& c, const Game& g, uint32_t t, const char* myName, bool lost) {
+  if (g.phase == Phase::Search) {
+    drawSearch(c, t, myName, lost);
+    return;
+  }
+
   drawBackground(c);
-  const uint32_t GREEN = 0x4CD27A;
-  if (s.flash) {
-    c.drawRect(0, 0, 240, 135, rgb(GREEN));
-    c.drawRect(1, 1, 238, 133, rgb(GREEN));
+  const bool placing = g.phase == Phase::Place;
+  drawLabels(c, placing ? g.cursorX : -1, placing ? g.cursorY : -1);
+  drawSea(c, t, false);
+  for (int i = 0; i < g.fleet.count; i++) drawShip(c, g.fleet.ships[i], Look::Normal);
+  if (placing) {
+    Ship gh = g.ghost();
+    c.setClipRect(GX, GY, N * CS + 1, N * CS + 1);  // a ghost hanging off the edge gets cut off
+    drawShip(c, gh, g.fleet.fits(gh) ? Look::GhostOk : Look::GhostBad);
+    c.clearClipRect();
   }
 
-  c.setFont(&fonts::FreeSansBold9pt7b);
-  c.setTextDatum(baseline_left);
-  c.setTextColor(rgb(GREEN));
-  c.drawString("LINKED", 12, 20);
-  float pulse = (sinf(t / 250.0f) + 1) / 2;
-  c.fillCircle(84, 15, 3, rgb(mix(0x0A1822, GREEN, 0.3f + 0.7f * pulse)));
-  keyHint(c, "ok", "send ping", 148, 9);
-
-  char buf[32];
-  const char* labels[6] = {"you", "partner", "heartbeats", "pings sent", "pings got", "resends"};
-  for (int i = 0; i < 6; i++) {
-    int y = 28 + i * 16;
-    c.setFont(&fonts::Font2);
-    c.setTextDatum(top_left);
-    c.setTextColor(rgb(C_MUTED));
-    c.drawString(labels[i], 12, y);
-    switch (i) {
-      case 0: snprintf(buf, sizeof buf, "%s", s.myName); break;
-      case 1: snprintf(buf, sizeof buf, "%s", s.peerName); break;
-      case 2: snprintf(buf, sizeof buf, "%lu", (unsigned long)s.heartbeats); break;
-      case 3: snprintf(buf, sizeof buf, "%lu  (acked %lu)", (unsigned long)s.pingsSent, (unsigned long)s.pingsAcked); break;
-      case 4: snprintf(buf, sizeof buf, "%lu", (unsigned long)s.pingsIn); break;
-      case 5: snprintf(buf, sizeof buf, "%lu   rtt %lu ms", (unsigned long)s.resends, (unsigned long)s.rttMs); break;
-    }
-    c.setTextColor(rgb(i == 4 && s.flash ? GREEN : C_WHITE));
-    c.drawString(buf, 100, y);
-  }
+  drawPanel(c);
+  if (placing) panelPlace(c, g);
+  else if (g.phase == Phase::Waiting) panelWait(c, t);
+  else panelBattle(c, g);
 }
