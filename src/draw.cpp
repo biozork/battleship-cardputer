@@ -1,8 +1,9 @@
 #include "draw.h"
+#include "fonts.h"
 #include "sound.h"
 
 // Layout, same numbers as the mock: grid at (GX,GY), 11 px cells, panel at PX.
-static const int N = GRID_N, CS = 11, GX = 16, GY = 12, PX = 134, PANEL_W = 104;
+static const int N = GRID_N, CS = 11, GX = 16, GY = 12, PX = 134, PANEL_RIGHT = PX + 103;
 static const char* COLS = "ABCDEFGHIJ";
 
 // ---------- colours ----------
@@ -84,40 +85,70 @@ static void blendEllipse(float cx, float cy, float rx, float ry, uint32_t col, f
   }
 }
 
-// ---------- text helpers ----------
-static void text(M5Canvas& c, const char* s, int x, int y, uint32_t col, uint8_t datum = top_left) {
-  c.setFont(&fonts::Font0);  // 8 px tall, the smallest allowed
+// ---------- text ----------
+// Smooth fonts, made by tools/make_fonts.py from the mock's two typefaces:
+// Atkinson Hyperlegible for reading, Pixelify Sans for headings and big text.
+enum class Font { Body, Bold, Small, Head, Logo, Big, Banner, Title, COUNT };
+
+struct SmoothFont {
+  lgfx::PointerWrapper data;  // where the font's bytes are (in flash)
+  lgfx::VLWfont font;         // the font, ready to draw with
+};
+static SmoothFont smooth[(int)Font::COUNT];
+
+// Prepares each font once, so drawing text later is quick.
+static void loadFonts() {
+  static bool done = false;
+  if (done) return;
+  done = true;
+  const uint8_t* arrays[] = {FONT_BODY, FONT_BOLD, FONT_SMALL, FONT_HEAD, FONT_LOGO, FONT_BIG, FONT_BANNER, FONT_TITLE};
+  const size_t sizes[] = {sizeof FONT_BODY, sizeof FONT_BOLD, sizeof FONT_SMALL, sizeof FONT_HEAD,
+                          sizeof FONT_LOGO, sizeof FONT_BIG,  sizeof FONT_BANNER, sizeof FONT_TITLE};
+  for (int i = 0; i < (int)Font::COUNT; i++) {
+    smooth[i].data.set(arrays[i], sizes[i]);
+    smooth[i].font.loadFont(&smooth[i].data);
+  }
+}
+
+// Draws text. y is the baseline (the line the letters sit on), like in the mock.
+static void text(M5Canvas& c, const char* s, int x, int y, uint32_t col, Font f = Font::Body,
+                 uint8_t datum = baseline_left) {
+  c.setFont(&smooth[(int)f].font);
   c.setTextSize(1);
   c.setTextDatum(datum);
   c.setTextColor(rgb(col));
   c.drawString(s, x, y);
 }
 
-// Bold heading; y is the baseline. Shrinks a little if it would not fit in maxW.
-static void heading(M5Canvas& c, const char* s, int x, int y, uint32_t col, uint8_t datum = baseline_left,
-                    int maxW = PANEL_W) {
-  c.setFont(&fonts::FreeSansBold9pt7b);
+static int textWidth(M5Canvas& c, const char* s, Font f) {
+  c.setFont(&smooth[(int)f].font);
   c.setTextSize(1);
-  int w = c.textWidth(s);
-  if (w > maxW) c.setTextSize(maxW / float(w));
-  c.setTextDatum(datum);
-  c.setTextColor(rgb(col));
-  c.drawString(s, x, y);
-  c.setTextSize(1);
+  return c.textWidth(s);
 }
 
-// A little key drawn like a keyboard key, e.g. [tab]. y is its top. Returns its width.
+static void heading(M5Canvas& c, const char* s, int x, int y, uint32_t col, uint8_t datum = baseline_left) {
+  text(c, s, x, y, col, Font::Head, datum);
+}
+
+// A little key drawn like a keyboard key, e.g. [tab]. y is its top; it is 11 px tall.
+static int keycapWidth(M5Canvas& c, const char* k) { return max(10, textWidth(c, k, Font::Small) + 6); }
+
 static int keycap(M5Canvas& c, const char* k, int x, int y) {
-  int w = strlen(k) * 6 + 5;
+  int w = keycapWidth(c, k);
   c.fillRoundRect(x, y, w, 11, 2, rgb(0x26363F));
   c.drawRoundRect(x, y, w, 11, 2, rgb(0x41596A));
-  text(c, k, x + w / 2, y + 2, C_WHITE, top_center);
+  text(c, k, x + w / 2, y + 9, C_WHITE, Font::Small, baseline_center);
   return w;
+}
+
+// A key followed by what it does, e.g. [ok] fire.
+static int keyHintWidth(M5Canvas& c, const char* k, const char* label) {
+  return keycapWidth(c, k) + 4 + textWidth(c, label, Font::Body);
 }
 
 static void keyHint(M5Canvas& c, const char* k, const char* label, int x, int y) {
   int w = keycap(c, k, x, y);
-  text(c, label, x + w + 5, y + 2, C_MUTED);
+  text(c, label, x + w + 4, y + 9, C_MUTED);
 }
 
 // ---------- background, board and panel ----------
@@ -137,9 +168,9 @@ static void drawLabels(M5Canvas& c, int cx, int cy) {
   for (int i = 0; i < N; i++) {
     buf[0] = COLS[i];
     buf[1] = 0;
-    text(c, buf, GX + i * CS + 6, GY - 10, i == cx ? C_YELLOW : C_LABEL, top_center);
+    text(c, buf, GX + i * CS + 6, GY - 3, i == cx ? C_YELLOW : C_LABEL, Font::Small, baseline_center);
     snprintf(buf, sizeof buf, "%d", i + 1);
-    text(c, buf, GX - 2, GY + i * CS + 2, i == cy ? C_YELLOW : C_LABEL, top_right);
+    text(c, buf, GX - 3, GY + i * CS + 9, i == cy ? C_YELLOW : C_LABEL, Font::Small, baseline_right);
   }
 }
 
@@ -322,39 +353,31 @@ static void drawPanel(M5Canvas& c) {
 static void panelPlace(M5Canvas& c, const Game& g) {
   const ShipType& type = SHIP_TYPES[g.fleet.count];
   heading(c, "PLACE FLEET", PX, 17, C_YELLOW);
-
-  c.setFont(&fonts::Font2);
-  c.setTextDatum(top_left);
-  c.setTextColor(rgb(0xFFFFFF));
-  c.drawString(type.name, PX, 22);
-  miniHull(c, PX, 40, type.size * 10, 0xC9D5DF, 0x52627A);
+  text(c, type.name, PX, 33, 0xFFFFFF, Font::Bold);
+  miniHull(c, PX, 38, type.size * 10, 0xC9D5DF, 0x52627A);
 
   for (int i = 0; i < NUM_SHIPS; i++) {  // progress: placed, current, still to come
     uint32_t col = i < g.fleet.count ? C_GREEN : i == g.fleet.count ? C_YELLOW : 0x2C3E48;
-    c.fillCircle(PX + 3 + i * 9, 56, 2, rgb(col));
+    c.fillCircle(PX + 3 + i * 9, 54, 2, rgb(col));
   }
 
-  keyHint(c, "r", "rotate", PX, 68);
-  keyHint(c, "a", "auto", PX, 82);
-  keyHint(c, "ok", "place", PX, 96);
-  if (g.msg[0][0]) text(c, g.msg[0], PX, 119, C_GREEN);
+  keyHint(c, "r", "rotate", PX, 64);
+  keyHint(c, "a", "auto", PX, 78);
+  keyHint(c, "ok", "place", PX, 92);
+  if (g.msg[0][0]) text(c, g.msg[0], PX, 125, C_GREEN);
 }
 
 static void panelWait(M5Canvas& c, uint32_t t) {
   heading(c, "FLEET READY", PX, 17, C_GREEN);
-  text(c, "Waiting for", PX, 30, C_WHITE);
-  text(c, "partner", PX, 41, C_WHITE);
+  text(c, "Waiting for", PX, 36, C_WHITE);
+  text(c, "partner", PX, 48, C_WHITE);
+  int dx = PX + textWidth(c, "partner", Font::Body) + 4;
   for (int i = 0; i < 3; i++) {
     float a = (sinf(t / 200.0f - i * 0.7f) + 1) / 2;
-    c.fillCircle(PX + 46 + i * 6, 47, 1, rgb(mix(0x0F1D25, C_GREEN, 0.3f + 0.7f * a)));
+    c.fillCircle(dx + i * 6, 46, 1, rgb(mix(0x0F1D25, C_GREEN, 0.3f + 0.7f * a)));
   }
-  text(c, "First one ready", PX, 64, C_MUTED);
-  text(c, "fires first.", PX, 75, C_MUTED);
-}
-
-static void scoreText(const Game& g, char* out, size_t n) {
-  snprintf(out, n, "score %u-%u", g.wins, g.losses);
-  if (strlen(out) > 9) snprintf(out, n, "%u-%u", g.wins, g.losses);  // keep it short for big scores
+  text(c, "First one ready", PX, 72, C_MUTED);
+  text(c, "fires first.", PX, 84, C_MUTED);
 }
 
 static void panelBattle(M5Canvas& c, const Game& g, uint32_t t) {
@@ -363,41 +386,37 @@ static void panelBattle(M5Canvas& c, const Game& g, uint32_t t) {
   uint32_t banner = live ? mix(0x2B8A3E, 0x3CB955, pulse) : g.myTurn ? 0x2B8A3E : 0x2A3A44;
   c.fillRoundRect(PX - 1, 6, 101, 17, 4, rgb(banner));
   if (live) c.drawRoundRect(PX - 2, 5, 103, 19, 5, rgb(mix(0x13232D, C_GREEN, 0.3f + 0.7f * pulse)));
-  heading(c, g.myTurn ? (g.pending ? "FIRING..." : "YOUR TURN") : "THEIR TURN", PX + 49, 20, 0xFFFFFF,
-          baseline_center, 96);
+  heading(c, g.myTurn ? (g.pending ? "FIRING..." : "YOUR TURN") : "THEIR TURN", PX + 49, 19, 0xFFFFFF,
+          baseline_center);
 
-  text(c, g.view == View::Shots ? "your shots" : "your fleet", PX, 29, C_MUTED);
-  keycap(c, "tab", PX + 81, 27);
+  text(c, g.view == View::Shots ? "your shots" : "your fleet", PX, 36, C_MUTED);
+  keycap(c, "tab", PANEL_RIGHT - keycapWidth(c, "tab"), 27);
 
   if (live && g.view == View::Shots) {
     char coord[4];
     coordName(g.cursorX, g.cursorY, coord);
-    c.setFont(&fonts::FreeSansBold12pt7b);
-    c.setTextSize(1);
-    c.setTextDatum(baseline_left);
-    c.setTextColor(rgb(C_YELLOW));
-    c.drawString(coord, PX, 58);
+    text(c, coord, PX, 58, C_YELLOW, Font::Big);
   }
-  text(c, g.msg[0], PX, 63, C_WHITE);
-  text(c, g.msg[1], PX, 74, C_YELLOW);
+  text(c, g.msg[0], PX, 71, C_WHITE);
+  text(c, g.msg[1], PX, 83, C_YELLOW, Font::Bold);
 
   // ships left: theirs and ours; sunk ones turn dark red
-  text(c, "them", PX, 88, C_MUTED);
+  text(c, "them", PX, 97, C_MUTED);
   for (int i = 0; i < NUM_SHIPS; i++) {
     bool dead = i < g.enemySunkCount;
-    miniHull(c, PX + 28 + i * 14, 89, 11, dead ? 0x6A3128 : 0xC9D5DF, dead ? 0x2A1210 : 0x52627A);
+    miniHull(c, PX + 30 + i * 14, 90, 11, dead ? 0x6A3128 : 0xC9D5DF, dead ? 0x2A1210 : 0x52627A);
   }
   int left = g.fleet.afloat();
-  text(c, "you", PX, 101, C_MUTED);
+  text(c, "you", PX, 110, C_MUTED);
   for (int i = 0; i < NUM_SHIPS; i++) {
     bool dead = i >= left;
-    miniHull(c, PX + 28 + i * 14, 102, 11, dead ? 0x6A3128 : 0xC9D5DF, dead ? 0x2A1210 : 0x52627A);
+    miniHull(c, PX + 30 + i * 14, 103, 11, dead ? 0x6A3128 : 0xC9D5DF, dead ? 0x2A1210 : 0x52627A);
   }
 
   char score[16];
-  scoreText(g, score, sizeof score);
-  text(c, score, PX, 119, C_MUTED);
-  if (live) keyHint(c, "ok", "fire", PX + 56, 117);
+  snprintf(score, sizeof score, "score %u-%u", g.wins, g.losses);
+  text(c, score, PX, 126, C_MUTED);
+  if (live) keyHint(c, "ok", "fire", PANEL_RIGHT - keyHintWidth(c, "ok", "fire"), 117);
 }
 
 // ---------- board views ----------
@@ -535,11 +554,7 @@ static void drawBanner(M5Canvas& c, const Effect& e, float k) {
   blendRect(GX, cy - 13, w + 1, 2, e.col, ease);
   blendRect(GX, cy + 11, w + 1, 2, e.col, ease);
   setClip(c, GX, cy - 13, w + 1, 26);
-  c.setFont(&fonts::FreeSansBold12pt7b);
-  c.setTextSize(1);
-  c.setTextDatum(baseline_center);
-  c.setTextColor(rgb(mix(0x0A1218, e.col, ease)));
-  c.drawString(e.text, GX + w / 2 + off, cy + 8);
+  text(c, e.text, GX + w / 2 + off, cy + 7, mix(0x0A1218, e.col, ease), Font::Banner, baseline_center);
   clearClip(c);
 }
 
@@ -613,27 +628,20 @@ static void drawOver(M5Canvas& c, const Game& g, uint32_t t) {
   if (g.won) fireworks(c, t);
 
   int bob = lroundf(sinf(t / 300.0f) * 1.5f);
-  c.setFont(&fonts::FreeSansBold18pt7b);
-  c.setTextSize(1);
-  c.setTextDatum(baseline_center);
-  c.setTextColor(rgb(g.won ? C_YELLOW : 0xFF8787));
-  c.drawString(g.won ? "YOU WIN!" : "FLEET SUNK", 120, 56 + bob);
-
-  c.setFont(&fonts::Font2);
-  c.setTextDatum(top_center);
-  c.setTextColor(rgb(C_WHITE));
-  c.drawString(g.won ? "Every ship found." : "Good game, admiral.", 120, 62);
+  text(c, g.won ? "YOU WIN!" : "FLEET SUNK", 120, 54 + bob, g.won ? C_YELLOW : 0xFF8787, Font::Title,
+       baseline_center);
+  text(c, g.won ? "Every ship found." : "Good game, admiral.", 120, 73, C_WHITE, Font::Body, baseline_center);
   char score[24];
   snprintf(score, sizeof score, "score %u - %u", g.wins, g.losses);
-  c.setTextColor(rgb(C_MUTED));
-  c.drawString(score, 120, 80);
+  text(c, score, 120, 89, C_MUTED, Font::Body, baseline_center);
 
   if (g.wantRematch) {
     char wait[28];
     snprintf(wait, sizeof wait, "waiting for partner%.*s", int(t / 400 % 4), "...");
-    text(c, wait, 120, 108, C_GREEN, top_center);
+    int w = textWidth(c, "waiting for partner...", Font::Body);  // fixed start, so the dots don't wobble
+    text(c, wait, 120 - w / 2, 114, C_GREEN);
   } else if (sinf(t / 250.0f) > -0.5f) {  // blinking hint
-    keyHint(c, "ok", "rematch", 88, 105);
+    keyHint(c, "ok", "rematch", 120 - keyHintWidth(c, "ok", "rematch") / 2, 105);
   }
 }
 
@@ -663,20 +671,21 @@ static void drawSearch(M5Canvas& c, uint32_t t, const char* myName, bool lost) {
     c.fillCircle(cx + cosf(b[0]) * b[1], cy + sinf(b[0]) * b[1], 2, rgb(mix(DISC, BRIGHT, al)));
   }
 
-  heading(c, "BATTLESHIP", 114, 52, C_YELLOW, baseline_left, 122);
-  text(c, "two-player, ESP-NOW", 115, 60, C_MUTED);
-  if (lost) text(c, "partner lost!", 115, 74, 0xFF8787);
-  text(c, "searching for", 115, 86, C_WHITE);
+  text(c, "BATTLESHIP", 114, 40, C_YELLOW, Font::Logo);
+  text(c, "two-player, ESP-NOW", 115, 54, C_MUTED);
+  if (lost) text(c, "partner lost!", 115, 70, 0xFF8787, Font::Bold);
+  text(c, "searching for", 115, 84, C_WHITE);
   char dots[12];
   snprintf(dots, sizeof dots, "partner%.*s", int(t / 400 % 4), "...");
-  text(c, dots, 115, 97, C_WHITE);
-  text(c, Sound::on() ? "m: sound on" : "m: sound off", 115, 108, C_LABEL);
-  text(c, myName, 115, 120, C_LABEL);
+  text(c, dots, 115, 96, C_WHITE);
+  keyHint(c, "m", Sound::on() ? "sound on" : "sound off", 115, 104);
+  text(c, myName, 115, 128, C_LABEL);
 }
 
 // ---------- whole frame ----------
 void drawGame(M5Canvas& c, const Game& g, uint32_t t, const char* myName, bool lost) {
   fb = (uint16_t*)c.getBuffer();
+  loadFonts();
   if (g.phase == Phase::Search) {
     drawSearch(c, t, myName, lost);
     return;
